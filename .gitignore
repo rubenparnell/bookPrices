@@ -1,0 +1,8 @@
+.venv
+venv
+ebayAccessToken.json
+ebayRefreshToken.json
+config.py
+*.csv
+__pychache__/
+*.pyc
