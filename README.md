@@ -23,6 +23,7 @@ pip install -r requirements.txt
 ```
 
 You’ll also need to:
+
 * Add your eBay Access Token and Refresh Token json files to the main directory. These files must be named `ebayAccessToken.json` and `ebayRefreshToken.json`.
 * Add your eBay client id, client secret, and redirect uri to a python file called `config.py`, in this format:
 
@@ -48,6 +49,9 @@ redirect_uri = "your-redirect-uri"
    * `Author`
    * `Title`
    * Any other metadata (will be retained in the output)
+
+   Note: the ISBN will be used if provided. If this is not available, then a search is made using the Author and Title.
+
 2. Launch the script:
    * Click **Browse** to select your input CSV.
    * Click **Process CSV** to choose a save location for the output file.
@@ -57,7 +61,7 @@ redirect_uri = "your-redirect-uri"
      * eBay UK and Global prices
      * Quantity available
      * Minimum price comparison
-     * Embedded image from eBay using Excel’s `=IMAGE(...)` formula.
+     * Embedded image from eBay or Abebooks using Excel’s `=IMAGE(...)` formula. These may not always be available.
 
 # Notes
 
