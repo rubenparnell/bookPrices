@@ -2,139 +2,197 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import csv
 import requests
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abebooks import AbeBooks
 from ebay import setup_tokens
-import time
 
+# ========================
+# GLOBALS
+# ========================
+session = requests.Session()
+session.headers.update({"Connection": "keep-alive"})
+
+token_lock = threading.Lock()
+access_token, access_token_expiry_time = setup_tokens()
+
+start_time = None
+lock = threading.Lock()
+
+# ========================
+# ABE BOOKS
+# ========================
 def get_abe_price_isbn(isbn):
     abebooks = AbeBooks()
-    count = 0
-    while count < 3:
+    for _ in range(3):
         try:
             response = abebooks.getPriceByISBN(isbn)
             price = response.get('pricingInfoForBestUsed')
             if price:
-                return price.get('bestPriceInPurchaseCurrencyValueOnly', None)
+                return price.get('bestPriceInPurchaseCurrencyValueOnly')
             return None
         except requests.RequestException:
-            count += 1
-            time.sleep(5)
-    return 'Error'
+            time.sleep(2)
+    return None
+
 
 def get_abe_price_other(author, title):
     abebooks = AbeBooks()
-    count = 0
-    while count < 3:
+    for _ in range(3):
         try:
             response = abebooks.getPriceByAuthorTitle(author, title)
             price = response.get('pricingInfoForBestUsed')
             if price:
-                return price.get('bestPriceInPurchaseCurrencyValueOnly', None)
+                return price.get('bestPriceInPurchaseCurrencyValueOnly')
             return None
         except requests.RequestException:
-            count += 1
-            time.sleep(5)
-    return 'Error'
+            time.sleep(2)
+    return None
 
+
+# ========================
+# EBAY
+# ========================
 def get_ebay_prices(query):
-    global access_token_expiry_time, access_token
-    
-    if access_token_expiry_time-30 < time.time():
-        access_token, access_token_expiry_time = setup_tokens()
+    global access_token, access_token_expiry_time
 
-    print(access_token_expiry_time)
-    print(time.time())
+    with token_lock:
+        if access_token_expiry_time - 30 < time.time():
+            access_token, access_token_expiry_time = setup_tokens()
 
-    headers = {"Authorization": f"Bearer {access_token}", "X-EBAY-C-MARKETPLACE-ID" : "EBAY_GB"}
-    params = {"q": query}
-    response = requests.get("https://api.ebay.com/buy/browse/v1/item_summary/search", headers=headers, params=params)
-    response.raise_for_status()
-    data = response.json()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
+    }
 
-    if len(data.get("itemSummaries", [])) == 0:
+    try:
+        response = session.get(
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
+            headers=headers,
+            params={"q": query},
+            timeout=10
+        )
+
+        if response.status_code == 401:
+            # token likely expired mid-request
+            with token_lock:
+                access_token, access_token_expiry_time = setup_tokens()
+            return get_ebay_prices(query)
+
+        response.raise_for_status()
+        data = response.json()
+
+    except Exception:
+        return None
+
+    items = data.get("itemSummaries", [])
+    if not items:
         return None
 
     all_prices = []
     uk_prices = []
 
-    # Extract price information
-    for item in data.get("itemSummaries", []):
-        price = float(item["price"]["value"])
-        all_prices.append(price)
-        
-        # Filter UK listings
-        if item.get("listingMarketplaceId") == "EBAY_GB":
-            uk_prices.append(price)
+    for item in items:
+        try:
+            price = float(item["price"]["value"])
+            all_prices.append(price)
 
-    # Calculate lowest and average prices
-    def calculate_prices(prices):
+            if item.get("listingMarketplaceId") == "EBAY_GB":
+                uk_prices.append(price)
+        except:
+            continue
+
+    def calc(prices):
         if not prices:
-            return None, None  # No items found
-        lowest_price = min(prices)
-        avg_price = sum(prices) / len(prices)
-        return lowest_price, avg_price
+            return None, None
+        return min(prices), sum(prices) / len(prices)
 
-    lowest_all, avg_all = calculate_prices(all_prices)
-    lowest_uk, avg_uk = calculate_prices(uk_prices)
+    lowest_all, avg_all = calc(all_prices)
+    lowest_uk, avg_uk = calc(uk_prices)
 
     return {
         "global": {"min": lowest_all, "avg": avg_all, "qty": len(all_prices)},
         "uk": {"min": lowest_uk, "avg": avg_uk, "qty": len(uk_prices)},
-        "image": data.get("itemSummaries", [])[0].get("image", {}).get("imageUrl", "")
+        "image": items[0].get("image", {}).get("imageUrl", "")
     }
 
-start_time = None
 
-def process_csv(input_file, output_file, root, update_progress):
-    with open(input_file, newline='', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
-        fieldnames = ['Image', 'Min Price', 'Abe Price', 'eBay UK Price min', 'eBay UK qty', 'eBay Global Price min', 'eBay Global qty'] + reader.fieldnames
-        rows = list(reader)
-        total_rows = len(rows)
+# ========================
+# PROCESSING
+# ========================
+def process_row(row):
+    try:
+        isbn = row.get('ISBN', '').strip().split(" ")[0]
 
-        for index, row in enumerate(rows):
-            isbn = row.get('ISBN', '').strip().split(" ")[0]
-            if isbn:
-                row['Abe Price'] = get_abe_price_isbn(isbn)
+        if isbn:
+            row['Abe Price'] = get_abe_price_isbn(isbn)
+            ebay_data = get_ebay_prices(isbn)
 
-                ebay_data = get_ebay_prices(isbn)
-                if not ebay_data:
-                    author = row.get('Author', '').strip()
-                    title = row.get('Title', '').strip()
-                    ebay_data = get_ebay_prices(f"{author} {title}")
-                    
-            else:
+            if not ebay_data:
                 author = row.get('Author', '').strip()
                 title = row.get('Title', '').strip()
-
-                row['Abe Price'] = get_abe_price_other(author, title)
                 ebay_data = get_ebay_prices(f"{author} {title}")
+        else:
+            author = row.get('Author', '').strip()
+            title = row.get('Title', '').strip()
 
-            if ebay_data:
-                row['eBay UK Price min'] = ebay_data['uk']['min']
-                row['eBay UK qty'] = ebay_data['uk']['qty']
-                row['eBay Global Price min'] = ebay_data['global']['min']
-                row['eBay Global qty'] = ebay_data['global']['qty']
-                row['Image'] = f'=IMAGE("{ebay_data["image"]}")'
+            row['Abe Price'] = get_abe_price_other(author, title)
+            ebay_data = get_ebay_prices(f"{author} {title}")
 
-                if row['Abe Price']:
-                    row['Min Price'] = min(float(row['Abe Price']), float(ebay_data['global']['min']))
-                else:
-                    row['Min Price'] = float(ebay_data['global']['min'])
+        if ebay_data:
+            row['eBay UK Price min'] = ebay_data['uk']['min']
+            row['eBay UK qty'] = ebay_data['uk']['qty']
+            row['eBay Global Price min'] = ebay_data['global']['min']
+            row['eBay Global qty'] = ebay_data['global']['qty']
+            row['Image'] = f'=IMAGE("{ebay_data["image"]}")'
 
+            if row['Abe Price']:
+                row['Min Price'] = min(float(row['Abe Price']), float(ebay_data['global']['min']))
             else:
-                row['Image'] = f'=IMAGE("https://pictures.abebooks.com/isbn/{isbn}.jpg")'
-                row['Min Price'] = row['Abe Price']
+                row['Min Price'] = float(ebay_data['global']['min'])
+        else:
+            row['Image'] = f'=IMAGE("https://pictures.abebooks.com/isbn/{isbn}.jpg")'
+            row['Min Price'] = row.get('Abe Price')
 
-            # Update progress bar
-            update_progress(index+1, total_rows)
-            root.update()  # Ensure UI updates immediately
+    except Exception as e:
+        row['Error'] = str(e)
 
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    return row
+
+
+def process_csv(input_file, output_file, root, update_progress):
+    with open(input_file, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = ['Image', 'Min Price', 'Abe Price',
+                      'eBay UK Price min', 'eBay UK qty',
+                      'eBay Global Price min', 'eBay Global qty'] + reader.fieldnames
+
+    results = [None] * len(rows)
+
+    MAX_WORKERS = 8
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_row, row): i for i, row in enumerate(rows)}
+
+        for count, future in enumerate(as_completed(futures), start=1):
+            idx = futures[future]
+            results[idx] = future.result()
+
+            with lock:
+                update_progress(count, len(rows))
+                root.update()
+
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(results)
 
+
+# ========================
+# GUI
+# ========================
 def select_file():
     file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
     if file_path:
@@ -191,7 +249,10 @@ def start_processing():
 
 access_token, access_token_expiry_time = setup_tokens()
 
-# GUI Setup
+
+# ========================
+# RUN GUI
+# ========================
 root = tk.Tk()
 root.title("Book Price Fetcher")
 root.geometry("400x320")

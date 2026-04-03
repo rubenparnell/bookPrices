@@ -1,5 +1,4 @@
 import requests
-from base64 import b64encode
 import base64
 from urllib.parse import urlparse, parse_qs
 import webbrowser
@@ -7,152 +6,152 @@ import time
 import json
 from config import client_id, client_secret, redirect_uri
 
-def setup_tokens():
-    # REFRESH TOKEN:
+TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+AUTH_URL = "https://auth.ebay.com/oauth2/authorize"
+
+
+def encode_credentials():
+    credentials = f"{client_id}:{client_secret}"
+    return "Basic " + base64.b64encode(credentials.encode()).decode()
+
+
+def save_json(filename, data):
+    with open(filename, "w") as f:
+        json.dump(data, f)
+
+
+def load_json(filename):
     try:
-        # Load the token and expiry time from the file
-        with open("ebayRefreshToken.json", "r") as token_file:
-            token_data = json.load(token_file)
-        refresh_token = token_data["refresh_token"]
-        expiry_time = token_data["expiry_time"]
+        with open(filename, "r") as f:
+            return json.load(f)
     except FileNotFoundError:
-        expiry_time = 0
-
-    # Check if token is still valid (optional)
-    if time.time() > expiry_time:
-        print("Refresh token expired. Please refresh.")
-        # Define all the scopes based on your requirements - what I need to use
-        scopes = (
-            "https://api.ebay.com/oauth/api_scope "
-        )
-
-        # Set the target endpoint for the consent request in production
-        consent_endpoint_production = "https://auth.ebay.com/oauth2/authorize"
-        token_endpoint = "https://api.ebay.com/identity/v1/oauth2/token"
-
-        # Define the consent URL
-        consent_url = (
-            f"{consent_endpoint_production}?"
-            f"client_id={client_id}&"
-            f"redirect_uri={redirect_uri}&"
-            f"response_type=code&"
-            f"scope={scopes}"
-        )
-
-        # Open the consent URL in the default web browser
-        webbrowser.open(consent_url)
-
-        print("Opening the browser. Please grant consent in the browser.")
-
-        # Retrieve the authorization code from the user after they grant consent
-        authorization_code_url = input("Enter the authorization code URL: ")
-
-        # Parse the URL to extract the authorization code
-        parsed_url = urlparse(authorization_code_url)
-        query_params = parse_qs(parsed_url.query)
-        authorization_code = query_params.get('code', [])[0]
-
-        # Make the authorization code grant request to obtain the token
-        payload = {
-            "grant_type": "authorization_code",
-            "code": authorization_code,
-            "redirect_uri": redirect_uri
-        }
-
-        # Encode the client credentials for the Authorization header
-        credentials = f"{client_id}:{client_secret}"
-        encoded_credentials = b64encode(credentials.encode()).decode()
-
-        # Set the headers for the token request
-        token_headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": f"Basic {encoded_credentials}"
-        }
-
-        # Make the POST request to the token endpoint
-        response = requests.post(token_endpoint, headers=token_headers, data=payload)
-
-        # Check the response
-        if response.status_code == 200:
-            # Parse and print the response JSON
-            response_json = response.json()
-            print("Response containing the User access token:")
-            print(response_json)
-
-            try:
-                new_token = response_json
-                print(new_token)
-                expiry_time = time.time() + new_token["refresh_token_expires_in"]
-
-                # Save token and expiry time to a file
-                token_data = {"refresh_token": new_token["refresh_token"], "expiry_time": expiry_time}
-                with open("ebayRefreshToken.json", "w") as token_file:
-                    json.dump(token_data, token_file)
-
-                print("New refresh token and expiry time saved to file.")
-
-            except requests.exceptions.RequestException as e:
-                print("Error:", e)
-        else:
-            print(f"Error: {response.status_code}, {response.text}")
-
-    else:
-        print("Valid refesh token.")
+        return None
 
 
-    # ACCESS TOKEN:
+def get_new_tokens_via_auth():
+    print("🔐 Starting manual authentication...")
 
-    # Load the token and expiry time from the file
-    with open("ebayAccessToken.json", "r") as token_file:
-        token_data = json.load(token_file)
-    access_token = token_data["access_token"]
-    expiry_time = token_data["expiry_time"]
+    scopes = "https://api.ebay.com/oauth/api_scope"
 
-    # Check if token is still valid (optional)
-    if time.time() > expiry_time:
-        print("Access token expired. Refreshing.")
-        
-        # Base URL for token endpoint
-        token_url = "https://api.ebay.com/identity/v1/oauth2/token"
+    consent_url = (
+        f"{AUTH_URL}?"
+        f"client_id={client_id}&"
+        f"redirect_uri={redirect_uri}&"
+        f"response_type=code&"
+        f"scope={scopes}"
+    )
 
-        # Function to encode credentials for authorization header
-        def encode_credentials():
-            credentials = f"{client_id}:{client_secret}"
-            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-            return f"Basic {encoded_credentials}"
+    webbrowser.open(consent_url)
+    print("Opened browser. Please log in and paste the FULL redirect URL.")
 
-        # Function to refresh access token
-        def refresh_access_token():
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Authorization": encode_credentials()
-            }
-            data = {
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": "https://api.ebay.com/oauth/api_scope"  # Replace with your desired scopes
-            }
-            response = requests.post(token_url, headers=headers, data=data)
-            response.raise_for_status()
-            return response.json()
+    redirect_response = input("Paste URL here: ").strip()
 
-        try:
-            new_token = refresh_access_token()
-            expiry_time = time.time() + new_token["expires_in"]
+    parsed = urlparse(redirect_response)
+    code = parse_qs(parsed.query).get("code", [None])[0]
 
-            # Save token and expiry time to a file
-            token_data = {"access_token": new_token["access_token"], "expiry_time": expiry_time}
-            with open("ebayAccessToken.json", "w") as token_file:
-                json.dump(token_data, token_file)
+    if not code:
+        raise Exception("❌ No authorization code found in URL.")
 
-            access_token = new_token["access_token"]
-            
-            print("New access token and expiry time saved to file.")
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": encode_credentials()
+    }
 
-        except requests.exceptions.RequestException as e:
-            print("Error:", e)
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri
+    }
 
-    else:
-        print("Valid access token.")
+    response = requests.post(TOKEN_URL, headers=headers, data=data)
 
-    return access_token, expiry_time
+    if response.status_code != 200:
+        print(response.text)
+        response.raise_for_status()
+
+    tokens = response.json()
+
+    access_token = tokens["access_token"]
+    refresh_token = tokens["refresh_token"]
+
+    access_expiry = time.time() + tokens["expires_in"]
+    refresh_expiry = time.time() + tokens["refresh_token_expires_in"]
+
+    # Save BOTH tokens
+    save_json("ebayAccessToken.json", {
+        "access_token": access_token,
+        "expiry_time": access_expiry
+    })
+
+    save_json("ebayRefreshToken.json", {
+        "refresh_token": refresh_token,
+        "expiry_time": refresh_expiry
+    })
+
+    print("✅ New tokens generated and saved.")
+
+    return access_token, access_expiry
+
+
+def refresh_access_token(refresh_token):
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": encode_credentials()
+    }
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+
+    response = requests.post(TOKEN_URL, headers=headers, data=data)
+
+    if response.status_code != 200:
+        print("❌ Refresh failed:", response.text)
+        raise Exception("Refresh token invalid")
+
+    tokens = response.json()
+
+    access_token = tokens["access_token"]
+    access_expiry = time.time() + tokens["expires_in"]
+
+    save_json("ebayAccessToken.json", {
+        "access_token": access_token,
+        "expiry_time": access_expiry
+    })
+
+    print("🔄 Access token refreshed.")
+
+    return access_token, access_expiry
+
+
+def setup_tokens():
+    # Load saved tokens
+    access_data = load_json("ebayAccessToken.json")
+    refresh_data = load_json("ebayRefreshToken.json")
+
+    # If no refresh token → full auth required
+    if not refresh_data:
+        return get_new_tokens_via_auth()
+
+    refresh_token = refresh_data["refresh_token"]
+    refresh_expiry = refresh_data["expiry_time"]
+
+    # If refresh token expired → full auth
+    if time.time() > refresh_expiry:
+        print("⚠️ Refresh token expired.")
+        return get_new_tokens_via_auth()
+
+    # If access token exists and valid → use it
+    if access_data and time.time() < access_data["expiry_time"]:
+        print("✅ Using existing access token.")
+        return access_data["access_token"], access_data["expiry_time"]
+
+    # Otherwise → refresh access token
+    try:
+        print("🔄 Refreshing access token...")
+        return refresh_access_token(refresh_token)
+
+    except Exception:
+        print("⚠️ Refresh failed. Re-authenticating...")
+        return get_new_tokens_via_auth()

@@ -4,5 +4,6 @@ ebayAccessToken.json
 ebayRefreshToken.json
 config.py
 *.csv
+*.xlsx
 __pychache__/
 *.pyc
